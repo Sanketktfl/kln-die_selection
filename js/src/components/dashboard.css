@@ -1,0 +1,14 @@
+.toast-popup {
+  position: fixed !important;
+  top: 20px !important;
+  left: 50% !important;
+  transform: translate(-50%, 0) !important; /* Start centered */
+  z-index: 9999 !important;
+  animation: slideUpFade 3s forwards !important;
+}
+
+@keyframes slideUpFade {
+  0%   { opacity: 1; transform: translate(-50%, 0); }
+  70%  { opacity: 1; transform: translate(-50%, -10px); }
+  100% { opacity: 0; transform: translate(-50%, -25px); }
+}
