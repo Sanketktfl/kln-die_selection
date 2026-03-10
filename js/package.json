@@ -9,6 +9,7 @@
     "author": "<unknown>",
     "license": "UNLICENSED",
     "private": true,
-    "dependencies": {},
-    "devDependencies": {}
+    "dependencies": {
+        "react-icons": "^5.6.0"
+    }
 }
