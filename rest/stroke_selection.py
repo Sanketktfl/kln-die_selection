@@ -6,6 +6,7 @@ from datetime import datetime,time
 from cdb import sqlapi
 from typing import Dict, Any
 import logging
+from opcua import Client,ua
 
 class StrokeSelection(JsonAPI):
     pass
@@ -14,6 +15,11 @@ class StrokeSelection(JsonAPI):
 def _mount_app():
     return StrokeSelection()
 
+
+def Print_log(exc):
+    with open(tempfile.gettempdir() + "\\opcua_log.txt", "a+") as log_file:
+        log_file.write("\n" + datetime.now().strftime("%d.%m.%Y %H:%M:%S") + ":" + str(exc))
+        log_file.write("\n " + traceback.format_exc())
 
 class StrokeSelectionData:
 
@@ -26,7 +32,7 @@ class StrokeSelectionData:
         plant_code = 7026
 
         sqldata = """
-            SELECT die_number, cut_wt, forge_stroke_selection,
+            SELECT die_number, forge_stroke_selection,
                    trim_stroke_selection, plant_code
             FROM kln_master_data
             WHERE 1=1
@@ -52,9 +58,9 @@ class StrokeSelectionData:
 
             # SAP OPENQUERY for net weight
             sap_sql = f"""
-            SELECT net_wt
+            SELECT net_wt, cut_wt
             FROM openquery([KTFLSQLDB.KALYANICORP.COM],
-            'select top 1 ntgew as net_wt
+            'select top 1 ntgew as net_wt, wfctb as cut_wt
             from zmm60
             where werks=''2002''
             and matnr like ''WFFOR%''
@@ -62,12 +68,14 @@ class StrokeSelectionData:
             order by laeda desc')
             """
             net_wt = None
+            cut_wt = None
 
             try:
                 sap_rs = sqlapi.RecordSet2(sql=sap_sql)
 
                 for row in sap_rs:
                     net_wt = row["net_wt"]
+                    cut_wt = row["cut_wt"]
                     break
 
             except Exception as e:
@@ -77,6 +85,7 @@ class StrokeSelectionData:
 
             # override net_wt with SAP value
             row_dict["net_wt"] = net_wt
+            row_dict["cut_wt"] = cut_wt
 
             data.append(row_dict)
 
@@ -146,6 +155,78 @@ class StrokeSelectionData:
             record["created_at"] = now
             record["shift"] = shift
             record.insert()
+
+            # opcua logic
+            client = Client("opc.tcp://172.21.204.30:4840")
+            try:
+                # OPC UA Server URL (replace with your server endpoint)
+
+                # If authentication is required
+                # client.set_user("username")
+                # client.set_password("password")
+
+                client.connect()
+                Print_log("Connected to OPC UA Server")
+
+                # Example: Read a variable node
+                node = client.get_node("ns=1;s=/HMI_DataProvider/kpi/die_number")  # your node ID
+                # value = node.get_value()
+                # Print_log(value)
+                die_no = int(die_number)
+                ua_value = ua.Variant(die_no, ua.VariantType.UInt16)
+                node.set_value(ua_value)
+
+                # FORGE STROKE (UInt16)
+                forge_node = client.get_node("ns=1;s=/HMI_DataProvider/fp/fp_stroke_selection")
+
+                forge_val = data.get("forge_stroke_selection")
+                if forge_val is None or forge_val == "":
+                    forge_val = 0  # default value
+                forge_stroke = int(forge_val)
+                if not (0 <= forge_stroke <= 65535):
+                    raise ValueError(f"forge_stroke_selection {forge_stroke} out of Int16 range")
+                forge_variant = ua.Variant(forge_stroke, ua.VariantType.Int16)
+                forge_node.set_value(forge_variant)
+                Print_log(f"Written forge_stroke_selection: {forge_stroke}")
+
+                # TRIM STROKE (UInt16)
+                trim_node = client.get_node("ns=1;s=/HMI_DataProvider/tp/tp_stroke_selection")
+                trim_val = data.get("trim_stroke_selection")
+                if trim_val is None or trim_val == "":
+                    trim_val = 0  # default value
+                trim_stroke = int(trim_val)
+                if not (0 <= trim_stroke <= 65535):
+                    raise ValueError(f"trim_stroke_selection {trim_stroke} out of Int16 range")
+                trim_variant = ua.Variant(trim_stroke, ua.VariantType.Int16)
+                trim_node.set_value(trim_variant)
+                Print_log(f"Written trim_stroke_selection: {trim_stroke}")
+
+                # CUT WEIGHT (Float)
+                cut_node = client.get_node("ns=1;s=/HMI_DataProvider/kpi/cut_weight")
+                cut_val = data.get("cut_wt")
+                if cut_val is None or cut_val == "":
+                    cut_val = 0.0
+                cut_float = float(cut_val)
+                cut_variant = ua.Variant(cut_float, ua.VariantType.Float)
+                cut_node.set_value(cut_variant)
+                Print_log(f"Written cut_weight: {cut_float}")
+
+                # NET WEIGHT (Float)
+                net_node = client.get_node("ns=1;s=/HMI_DataProvider/kpi/net_weight")
+                net_val = data.get("net_wt")
+                if net_val is None or net_val == "":
+                    net_val = 0.0
+                net_float = float(net_val)
+                net_variant = ua.Variant(net_float, ua.VariantType.Float)
+                net_node.set_value(net_variant)
+                Print_log(f"Written net_weight: {net_float}")
+
+            except Exception as e:
+                Print_log(e)
+
+            finally:
+                client.disconnect()
+                Print_log("Disconnected from OPC UA Server")
 
             return {
                 "status": "created",

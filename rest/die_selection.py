@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, time
 from cdb import sqlapi, auth
 from typing import Dict, Any
 import logging
+import tempfile
+import traceback
 
 
 class DieSelection(JsonAPI):
@@ -13,6 +15,13 @@ class DieSelection(JsonAPI):
 @Internal.mount(app=DieSelection, path="die_selection")
 def _mount_app():
     return DieSelection()
+
+
+# ── logging helper (same pattern as stroke_selection.py) ─────────────────────
+def Print_log(exc):
+    with open(tempfile.gettempdir() + "\\opcua_log.txt", "a+") as log_file:
+        log_file.write("\n" + datetime.now().strftime("%d.%m.%Y %H:%M:%S") + ":" + str(exc))
+        log_file.write("\n " + traceback.format_exc())
 
 
 class DieSelectionData:
@@ -39,7 +48,7 @@ class DieSelectionData:
 
         sqldata = (
             "SELECT cdb_object_id, die_number, forge_press, net_wt, cut_wt, forge_stroke_selection, "
-            "trim_stroke_selection, plant_code, created_at, shift "
+            "trim_stroke_selection, plant_code, created_at, shift, forge_stroke_counter, tonnage "
             "FROM kln_die_selection"
         )
 
@@ -69,85 +78,107 @@ class DieSelectionData:
     def carry_forward_dies(self, forge_lines):
         now = datetime.now()
         current_shift = self.get_shift(now)
-        prev_shift = self.get_previous_shift(current_shift)
-
-        # FIX: Shift 3 (raat 23:30 - subah 7:30) ke liye date sahi calculate karo
-        # Shift 3 mein current day aur previous day dono cover hote hain
         today = now.date()
 
-        # Shift 3 mein agar time midnight ke baad hai toh "shift date" kal thi
+        # ── Current shift date boundary ──────────────────────────────────────
         if current_shift == 3 and now.time() < time(7, 30):
-            shift_date = today - timedelta(days=1)  # raat mein shift 3 kal se start hua
+            shift_date = today - timedelta(days=1)
         else:
             shift_date = today
 
-        # Previous shift ki date bhi sahi nikalo
-        if prev_shift == 3:
-            # Shift 3 kal raat ko thi
-            prev_shift_date = shift_date - timedelta(days=1)
-        else:
-            prev_shift_date = shift_date
-
-        # Lookback: 2 din peeche tak dekho (safety margin)
-        lookback_date = prev_shift_date - timedelta(days=1)
-
         carried = []
         skipped = []
+        errors = []
 
         for press in forge_lines:
-            # Check: kya current shift mein is press ka data already hai?
-            sql_check = (
-                "SELECT COUNT(*) as cnt "
-                "FROM kln_die_selection "
-                "WHERE forge_press = '" + str(press) + "' "
-                "AND shift = " + str(current_shift) + " "
-                "AND CAST(created_at AS DATE) = '" + str(shift_date) + "'"
-            )
-            rs_check = sqlapi.RecordSet2(sql=sql_check)
-            count = rs_check[0]["cnt"] if rs_check else 0
+            try:
+                # ── 1. Skip if current shift already has data for this press ─
+                sql_check = (
+                        "SELECT COUNT(*) as cnt "
+                        "FROM kln_die_selection "
+                        "WHERE forge_press = '" + str(press) + "' "
+                                                               "AND shift = " + str(current_shift) + " "
+                                                                                                     "AND CAST(created_at AS DATE) = '" + str(
+                    shift_date) + "'"
+                )
+                rs_check = sqlapi.RecordSet2(sql=sql_check)
+                count = rs_check[0]["cnt"] if rs_check else 0
 
-            if count > 0:
-                skipped.append(press)
+                if count > 0:
+                    skipped.append(press)
+                    self.logger.info(f"Carry-forward skipped (already has data): press={press} shift={current_shift}")
+                    continue
+
+                # ── 2. Get the single latest die ever saved for this press ───
+                # No shift/date filter — just the absolute latest record
+                sql_latest = (
+                        "SELECT TOP 1 die_number, plant_code, cut_wt, net_wt, "
+                        "forge_stroke_selection, trim_stroke_selection "
+                        "FROM kln_die_selection "
+                        "WHERE forge_press = '" + str(press) + "' "
+                                                               "ORDER BY created_at DESC"
+                )
+                rs_latest = sqlapi.RecordSet2(sql=sql_latest)
+
+                if not rs_latest:
+                    self.logger.info(f"Carry-forward: no previous data found for press={press}")
+                    continue
+
+                prev = rs_latest[0]
+                plant_code = prev["plant_code"]
+                die_number = prev["die_number"]
+
+                if not plant_code or not die_number:
+                    errors.append({"press": press, "reason": "missing plant_code or die_number"})
+                    continue
+
+                # ── 3. Duplicate guard ────────────────────────────────────────
+                sql_dup = (
+                        "SELECT COUNT(*) as cnt "
+                        "FROM kln_die_selection "
+                        "WHERE die_number = '" + str(die_number) + "' "
+                                                                   "AND plant_code = " + str(plant_code) + " "
+                                                                                                           "AND forge_press = '" + str(
+                    press) + "' "
+                             "AND shift = " + str(current_shift) + " "
+                                                                   "AND CAST(created_at AS DATE) = '" + str(
+                    shift_date) + "'"
+                )
+                rs_dup = sqlapi.RecordSet2(sql=sql_dup)
+                if rs_dup and rs_dup[0]["cnt"] > 0:
+                    skipped.append(press)
+                    continue
+
+                # ── 4. Insert carried record ──────────────────────────────────
+                record = sqlapi.Record("kln_die_selection")
+                record["die_number"] = die_number
+                record["plant_code"] = plant_code
+                record["forge_press"] = press
+                record["cut_wt"] = prev["cut_wt"]
+                record["net_wt"] = prev["net_wt"]
+                record["forge_stroke_selection"] = prev["forge_stroke_selection"]
+                record["trim_stroke_selection"] = prev["trim_stroke_selection"]
+                record["created_at"] = now
+                record["shift"] = current_shift
+                # forge_stroke_counter and tonnage start NULL — filled when next die is added
+                record.insert()
+
+                carried.append({"press": press, "die_number": die_number})
+                self.logger.info(f"Carried forward press={press} die={die_number} to shift={current_shift}")
+
+            except Exception as e:
+                error_msg = f"Carry-forward FAILED for press={press}: {str(e)}"
+                self.logger.error(error_msg)
+                Print_log(error_msg)
+                errors.append({"press": press, "reason": str(e)})
                 continue
-
-            # FIX: Previous shift ka data fetch karo — correct date range ke saath
-            sql_prev = (
-                "SELECT TOP 1 die_number, plant_code, cut_wt, net_wt, "
-                "forge_stroke_selection, trim_stroke_selection "
-                "FROM kln_die_selection "
-                "WHERE forge_press = '" + str(press) + "' "
-                "AND shift = " + str(prev_shift) + " "
-                "AND CAST(created_at AS DATE) >= '" + str(lookback_date) + "' "
-                "AND CAST(created_at AS DATE) <= '" + str(prev_shift_date) + "' "
-                "ORDER BY created_at DESC"
-            )
-            rs_prev = sqlapi.RecordSet2(sql=sql_prev)
-
-            if not rs_prev:
-                self.logger.info(f"No previous shift data found for press: {press}")
-                continue
-
-            prev = rs_prev[0]
-            record = sqlapi.Record("kln_die_selection")
-            record["die_number"] = prev["die_number"]
-            record["plant_code"] = prev["plant_code"]
-            record["forge_press"] = press
-            record["cut_wt"] = prev["cut_wt"]
-            record["net_wt"] = prev["net_wt"]
-            record["forge_stroke_selection"] = prev["forge_stroke_selection"]
-            record["trim_stroke_selection"] = prev["trim_stroke_selection"]
-            record["created_at"] = now
-            record["shift"] = current_shift
-            record.insert()
-
-            carried.append({"press": press, "die_number": prev["die_number"]})
-            self.logger.info(f"Carried forward press {press}, die {prev['die_number']} to shift {current_shift}")
 
         return {
             "status": "done",
             "current_shift": current_shift,
             "carried_forward": carried,
             "already_had_data": skipped,
+            "errors": errors,
         }
 
 
