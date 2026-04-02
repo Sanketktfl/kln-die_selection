@@ -1,3 +1,5 @@
+# Fetches data from master data and save to die selection
+
 import tempfile
 import traceback
 from cs.platform.web import JsonAPI
@@ -20,6 +22,49 @@ def Print_log(exc):
     with open(tempfile.gettempdir() + "\\opcua_log.txt", "a+") as log_file:
         log_file.write("\n" + datetime.now().strftime("%d.%m.%Y %H:%M:%S") + ":" + str(exc))
         log_file.write("\n " + traceback.format_exc())
+
+OPC_TAG_CONFIG = {
+    "NS1": {
+        "run_code":  "ns=1;s=/HMI_DataProvider/run_code",
+        "heat_code": "ns=1;s=/HMI_DataProvider/heat_code",
+    },
+    "NS2": {
+        "run_code":  "ns=2;s=Studio.Tags.Application.Run_Code",
+        "heat_code": "ns=2;s=Studio.Tags.Application.Heat_Code",
+    }
+}
+
+NS1_PRESSES = ["4001","1002","1003","2501","2503","2506","1001","630","1602","3000","1601","4000"]
+NS2_PRESSES = ["2505","2502","4002"]
+
+PRESS_CONFIG = {
+    "FP2506T":  "172.21.201.159:4840",
+    "FP1001T":  "172.21.201.161:4840",
+    "FP1002T":  "172.21.201.155:4840",
+    "FP1003T":  "172.21.201.156:4840",
+    "FP1601T":  "172.21.201.165:4840",
+    "FP1602T":  "172.21.201.160:4840",
+    "FP2501T":  "172.21.201.157:4840",
+    "FP2502T":  "172.21.201.152:48010",
+    "FP2503T":  "172.21.201.158:4840",
+    "FP2505T":  "172.21.201.151:48010",
+    "FP3000T":  "172.21.201.162:4840",
+    "FP4000TA": "172.21.201.164:4840",
+    "FP4001T":  "172.21.201.154:4840",
+    "FP4002T":  "172.21.201.153:48010",
+    "FP630T":   "172.21.201.163:4840",
+    "FP1002SP": "172.21.201.155:4840",
+    "FP2507SP": None,
+    "FP1001SP": "172.21.201.161:4840",
+}
+
+def get_opc_tag_group(press_name: str):
+    press = ''.join(filter(str.isdigit, str(press_name)))
+    if press in NS1_PRESSES:
+        return OPC_TAG_CONFIG["NS1"]
+    elif press in NS2_PRESSES:
+        return OPC_TAG_CONFIG["NS2"]
+    return None
 
 class StrokeSelectionData:
 
@@ -58,15 +103,25 @@ class StrokeSelectionData:
 
             # SAP OPENQUERY for net weight
             sap_sql = f"""
-            SELECT net_wt, cut_wt
+            SELECT net_wt
             FROM openquery([KTFLSQLDB.KALYANICORP.COM],
-            'select top 1 ntgew as net_wt, wfctb as cut_wt
+            'select top 1 ntgew as net_wt
             from zmm60
             where werks=''2002''
             and matnr like ''WFFOR%''
             and bismt=''{die_number_5}''
             order by laeda desc')
             """
+            sap_sql2 = f"""
+                        SELECT cut_wt
+                        FROM openquery([KTFLSQLDB.KALYANICORP.COM],
+                        'select top 1 ntgew as cut_wt
+                        from zmm60
+                        where werks=''2002''
+                        and matnr like ''WFCTB%''
+                        and bismt=''{die_number_5}''
+                        order by laeda desc')
+                        """
             net_wt = None
             cut_wt = None
 
@@ -75,6 +130,11 @@ class StrokeSelectionData:
 
                 for row in sap_rs:
                     net_wt = row["net_wt"]
+                    break
+
+                sap_rs2 = sqlapi.RecordSet2(sql=sap_sql2)
+
+                for row in sap_rs2:
                     cut_wt = row["cut_wt"]
                     break
 
@@ -119,6 +179,8 @@ class StrokeSelectionData:
             die_number = data.get("die_number")
             plant_code = data.get("plant_code")
             forge_press = data.get("forge_press")
+            heat_code = data.get("heat_code")
+            run_code = data.get("run_code")
 
             now = datetime.now()
             shift = self.get_shift(now)
@@ -154,6 +216,8 @@ class StrokeSelectionData:
             record["trim_stroke_selection"] = data.get("trim_stroke_selection")
             record["created_at"] = now
             record["shift"] = shift
+            record["heat_code"] = heat_code
+            record["run_code"] = run_code
             record.insert()
 
             # opcua logic
@@ -227,6 +291,43 @@ class StrokeSelectionData:
             finally:
                 client.disconnect()
                 Print_log("Disconnected from OPC UA Server")
+
+            # ── Write heat_code & run_code to per-press HMI ──────────────────
+            press_ip = PRESS_CONFIG.get(str(forge_press))
+
+            if press_ip:
+                tag_group = get_opc_tag_group(forge_press)
+                if tag_group:
+                    hc_client = Client(f"opc.tcp://{press_ip}")
+                    try:
+                        hc_client.connect()
+                        Print_log(f"Connected to press HMI {press_ip} for heat/run code write")
+
+                        run_val = str(run_code) if run_code else "NA"
+                        heat_val = str(heat_code) if heat_code else "NA"
+
+                        hc_client.get_node(tag_group["run_code"]).set_value(
+                            ua.Variant(run_val, ua.VariantType.String)
+                        )
+                        Print_log(f"Written run_code={run_val} to press={forge_press}")
+
+                        hc_client.get_node(tag_group["heat_code"]).set_value(
+                            ua.Variant(heat_val, ua.VariantType.String)
+                        )
+                        Print_log(f"Written heat_code={heat_val} to press={forge_press}")
+
+                    except Exception as e:
+                        Print_log(f"heat/run OPC write failed press={forge_press}: {e}")
+                    finally:
+                        try:
+                            hc_client.disconnect()
+                            Print_log(f"Disconnected press HMI {press_ip}")
+                        except Exception:
+                            pass
+                else:
+                    Print_log(f"No OPC tag group found for press={forge_press} — skipping heat/run write")
+            else:
+                Print_log(f"No IP configured for press={forge_press} — skipping heat/run write")
 
             return {
                 "status": "created",

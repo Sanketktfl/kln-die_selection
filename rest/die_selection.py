@@ -1,3 +1,5 @@
+# fetches the saved data in the die selection
+
 from cs.platform.web import JsonAPI
 from cs.platform.web.root import Internal
 from datetime import datetime, timedelta, time
@@ -48,7 +50,8 @@ class DieSelectionData:
 
         sqldata = (
             "SELECT cdb_object_id, die_number, forge_press, net_wt, cut_wt, forge_stroke_selection, "
-            "trim_stroke_selection, plant_code, created_at, shift, forge_stroke_counter, tonnage "
+            "trim_stroke_selection, plant_code, created_at, shift, forge_stroke_counter, tonnage, "
+            "heat_code, run_code " 
             "FROM kln_die_selection"
         )
 
@@ -113,7 +116,7 @@ class DieSelectionData:
                 # No shift/date filter — just the absolute latest record
                 sql_latest = (
                         "SELECT TOP 1 die_number, plant_code, cut_wt, net_wt, "
-                        "forge_stroke_selection, trim_stroke_selection "
+                        "forge_stroke_selection, trim_stroke_selection, heat_code, run_code "
                         "FROM kln_die_selection "
                         "WHERE forge_press = '" + str(press) + "' "
                                                                "ORDER BY created_at DESC"
@@ -160,6 +163,8 @@ class DieSelectionData:
                 record["trim_stroke_selection"] = prev["trim_stroke_selection"]
                 record["created_at"] = now
                 record["shift"] = current_shift
+                record["heat_code"] = prev["heat_code"]
+                record["run_code"] = prev["run_code"]
                 # forge_stroke_counter and tonnage start NULL — filled when next die is added
                 record.insert()
 

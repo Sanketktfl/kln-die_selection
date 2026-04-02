@@ -14,6 +14,8 @@ const Dashboard = () => {
   const [toastMessage, setToastMessage] = useState("");
   const [toastType, setToastType] = useState("success");
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [heatCodes, setHeatCodes] = useState({});
+  const [runCodes, setRunCodes] = useState({});
 
   const [editRow, setEditRow] = useState(null);
   const [editFields, setEditFields] = useState({});
@@ -254,10 +256,20 @@ const Dashboard = () => {
     setResults((prev) => { const u = { ...prev }; delete u[pressId]; return u; });
     setDieNumbers((prev) => ({ ...prev, [pressId]: "" }));
     setSavedPresses((prev) => { const u = { ...prev }; delete u[pressId]; return u; });
+    setHeatCodes((prev) => ({ ...prev, [pressId]: "" }));
+    setRunCodes((prev) => ({ ...prev, [pressId]: "" }));
   };
 
   const handleSave = async (pressId, pressName) => {
     if (!results[pressId]) { showToast("⚠ Please fetch Die data first.", "error"); return; }
+    if (!heatCodes[pressId] || !heatCodes[pressId].trim()) {
+      showToast("🔴 Heat Code is required before saving.", "error");
+      return;
+    }
+    if (!runCodes[pressId] || !runCodes[pressId].trim()) {
+      showToast("🔴 Run Code is required before saving.", "error");
+      return;
+    }
 
     const existingCount = getShiftDieCountForPress(pressName);
 
@@ -280,6 +292,8 @@ const Dashboard = () => {
       net_wt: results[pressId].net_wt,
       forge_stroke_selection: results[pressId].forge_stroke_selection,
       trim_stroke_selection: results[pressId].trim_stroke_selection,
+      heat_code: heatCodes[pressId] || "",
+      run_code:  runCodes[pressId] || "",
     };
     try {
       const authOptions = await getAuthHeadersWithCSRF();
@@ -329,6 +343,8 @@ const Dashboard = () => {
       net_wt: row.net_wt ?? "",
       forge_stroke_selection: row.forge_stroke_selection ?? "",
       trim_stroke_selection: row.trim_stroke_selection ?? "",
+      heat_code: row.heat_code ?? "",
+      run_code:  row.run_code  ?? "",
     });
   };
 
@@ -343,6 +359,8 @@ const Dashboard = () => {
       if (editFields.net_wt !== "") payload.net_wt = Number(editFields.net_wt);
       if (editFields.forge_stroke_selection !== "") payload.forge_stroke_selection = Number(editFields.forge_stroke_selection);
       if (editFields.trim_stroke_selection !== "") payload.trim_stroke_selection = Number(editFields.trim_stroke_selection);
+      if (editFields.heat_code !== "") payload.heat_code = editFields.heat_code;
+      if (editFields.run_code  !== "") payload.run_code  = editFields.run_code;
 
       const putRes = await fetch(atId, {
         method: "PUT",
@@ -417,6 +435,8 @@ const Dashboard = () => {
                 { key: "net_wt",                 label: "Net Weight" },
                 { key: "forge_stroke_selection", label: "Forge Stroke" },
                 { key: "trim_stroke_selection",  label: "Trim Stroke" },
+                { key: "heat_code", label: "Heat Code" },
+                { key: "run_code",  label: "Run Code"  },
               ].map(({ key, label }) => (
                 <div key={key} style={styles.editField}>
                   <label style={styles.editLabel}>{label}</label>
@@ -555,7 +575,7 @@ const Dashboard = () => {
                             🔧 {row.die_number}
                             {row.forge_stroke_counter != null && (
                               <span style={styles.counterChip}>
-                                📊 {row.forge_stroke_counter} strokes
+                                📊 {row.forge_stroke_counter} counter
                               </span>
                             )}
                           </span>
@@ -583,6 +603,26 @@ const Dashboard = () => {
                           <tr><td style={styles.th2}>Trim Stroke</td><td style={styles.td2}>{results[pressId].trim_stroke_selection}</td></tr>
                         </tbody>
                       </table>
+                      <div style={styles.heatRunGrid}>
+                        <div style={styles.heatRunField}>
+                          <label style={styles.heatRunLabel}>Heat Code <span style={{ color: "#ef4444" }}>*</span></label>
+                          <input
+                            type="text"
+                            value={heatCodes[pressId] || ""}
+                            onChange={(e) => setHeatCodes((prev) => ({ ...prev, [pressId]: e.target.value }))}
+                            style={styles.heatRunInput}
+                          />
+                        </div>
+                        <div style={styles.heatRunField}>
+                          <label style={styles.heatRunLabel}>Run Code <span style={{ color: "#ef4444" }}>*</span></label>
+                          <input
+                            type="text"
+                            value={runCodes[pressId] || ""}
+                            onChange={(e) => setRunCodes((prev) => ({ ...prev, [pressId]: e.target.value }))}
+                            style={styles.heatRunInput}
+                          />
+                        </div>
+                      </div>
                       <button
                         type="button"
                         style={{ ...styles.saveButton, ...(savedPresses[pressId] ? { background: "#9ca3af", cursor: "not-allowed" } : {}) }}
@@ -631,6 +671,8 @@ const Dashboard = () => {
                         <th style={styles.th2}>Net Weight</th>
                         <th style={styles.th2}>Forge Stroke</th>
                         <th style={styles.th2}>Trim Stroke</th>
+                        <th style={styles.th2}>Heat Code</th>
+                        <th style={styles.th2}>Run Code</th>
                         <th style={styles.th2}>HMI Counter</th>
                         <th style={styles.th2}>Tonnage (kg)</th>
                         <th style={styles.th2}>Time</th>
@@ -648,6 +690,12 @@ const Dashboard = () => {
                             <td style={styles.td2}>{row.net_wt}</td>
                             <td style={styles.td2}>{row.forge_stroke_selection}</td>
                             <td style={styles.td2}>{row.trim_stroke_selection}</td>
+                            <td style={{ ...styles.td2, fontWeight: row.heat_code ? "600" : "400", color: row.heat_code ? "#1f2937" : "#9ca3af" }}>
+                              {row.heat_code ?? "—"}
+                            </td>
+                            <td style={{ ...styles.td2, fontWeight: row.run_code ? "600" : "400", color: row.run_code ? "#1f2937" : "#9ca3af" }}>
+                              {row.run_code ?? "—"}
+                            </td>
                             <td style={{
                               ...styles.td2,
                               fontWeight: row.forge_stroke_counter != null ? "700" : "400",
@@ -735,4 +783,8 @@ const styles = {
   snapshotLoading: { display: "flex", alignItems: "center", gap: "10px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: "8px", padding: "10px", marginTop: "12px" },
   spinner: { width: "18px", height: "18px", border: "3px solid #bae6fd", borderTop: "3px solid #3b82f6", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 },
   title: { marginTop: 0 },
+  heatRunGrid:  { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "10px", marginBottom: "2px" },
+  heatRunField: { display: "flex", flexDirection: "column", gap: "4px" },
+  heatRunLabel: { fontSize: "12px", fontWeight: "600", color: "#374151" },
+  heatRunInput: { padding: "7px 10px", borderRadius: "6px", border: "1px solid #93c5fd", fontSize: "13px", background: "#fff" },
 };
